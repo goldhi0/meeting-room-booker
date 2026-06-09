@@ -745,6 +745,7 @@ struct BookingView: View {
 
 struct DayTimelineView: View {
     @ObservedObject var vm: BookingViewModel
+    @State private var hoveredID: String? = nil   // 커서 올린 예약 막대 (즉시 툴팁용)
 
     private let startMin = 8 * 60      // 08:00
     private let endMin = 20 * 60       // 20:00
@@ -777,6 +778,7 @@ struct DayTimelineView: View {
                     .font(.system(size: 9)).foregroundColor(Theme.textSecondary).padding(.top, 2)
             }
         }
+        .animation(.easeOut(duration: 0.12), value: hoveredID)
     }
 
     private var axisRow: some View {
@@ -831,10 +833,34 @@ struct DayTimelineView: View {
                     if isSelected {
                         proposed(geo.size.width)
                     }
+                    // 커서 올린 막대 위에 즉시 뜨는 제목 툴팁
+                    if let ev = evs.first(where: { $0.id == hoveredID }) {
+                        let cx = (x(ev.startMinuteOfDay, geo.size.width) + x(ev.endMinuteOfDay, geo.size.width)) / 2
+                        tooltip(ev)
+                            .position(x: min(max(cx, 0), geo.size.width), y: -14)
+                            .zIndex(10)
+                    }
                 }
             }
             .frame(height: rowHeight)
         }
+        // 툴팁이 위 행을 가리지 않고 위로 올라오도록, hover 중인 행을 앞으로
+        .zIndex(evs.contains { $0.id == hoveredID } ? 1 : 0)
+    }
+
+    /// 막대 위에 뜨는 제목+시간 툴팁.
+    private func tooltip(_ ev: BookedEvent) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(ev.room.map { "[\($0)] \(ev.title)" } ?? ev.title)
+                .font(.system(size: 11, weight: .bold)).foregroundColor(.white)
+            Text(ev.timeText)
+                .font(.system(size: 10)).foregroundColor(.white.opacity(0.85))
+        }
+        .padding(.horizontal, 9).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.textPrimary))
+        .shadow(color: Color.black.opacity(0.18), radius: 5, y: 2)
+        .fixedSize()
+        .allowsHitTesting(false)
     }
 
     private func block(_ ev: BookedEvent, _ width: CGFloat, _ color: Color) -> some View {
@@ -845,6 +871,10 @@ struct DayTimelineView: View {
             .fill(color)
             .frame(width: w, height: rowHeight - 4)
             .offset(x: x0)
+            .onHover { hovering in
+                if hovering { hoveredID = ev.id }
+                else if hoveredID == ev.id { hoveredID = nil }
+            }
             .help("\(ev.timeText) \(ev.title)")
     }
 
