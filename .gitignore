@@ -1,0 +1,19 @@
+# OAuth 비밀 (절대 커밋 금지)
+Sources/MeetingRoomBooker/Secrets.swift
+
+# 빌드 산출물
+build/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+
+# Swift / SPM
+.build/
+*.swiftmodule
+*.o
+
+# 로그
+*.log
