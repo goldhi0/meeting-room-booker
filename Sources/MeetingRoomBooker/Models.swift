@@ -22,12 +22,19 @@ struct CalendarInfo: Identifiable, Hashable {
 /// 캘린더에 이미 잡혀 있는 예약 1건 (선택한 날짜 기준).
 struct BookedEvent: Identifiable, Hashable {
     let id: String
-    let room: String?      // 제목의 "[회의실명]" 에서 추출 (없을 수 있음)
+    let room: String?      // 제목의 "[회의실명]" 에서 추출 후 표준 회의실명으로 보정한 값 (없을 수 있음)
+    let rawRoom: String?   // 보정 전, 제목에 실제로 적혀 있던 회의실명 (오타 표시용)
     let title: String
     let start: Date
     let end: Date
     let colorId: String?
     let creatorEmail: String?   // 이벤트를 만든 사람의 이메일 (내 예약 판별용)
+
+    /// 제목의 회의실명에 오타가 있어 표준 회의실명으로 보정됐는지.
+    var roomCorrected: Bool {
+        guard let room = room, let rawRoom = rawRoom else { return false }
+        return room != rawRoom
+    }
 
     private static let hm: DateFormatter = {
         let f = DateFormatter(); f.locale = Locale(identifier: "ko_KR"); f.dateFormat = "HH:mm"; return f

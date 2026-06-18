@@ -99,10 +99,13 @@ final class GoogleCalendarService {
         return parsed.items.compactMap { item -> BookedEvent? in
             guard let s = parse(item.start), let e = parse(item.end) else { return nil }
             let summary = item.summary ?? "(제목 없음)"
-            let (room, title) = splitRoom(summary)
+            let (rawRoom, title) = splitRoom(summary)
+            // 오타가 있어도 표준 회의실명으로 보정. 보정 실패(nil)면 원래 적힌 이름을 유지한다.
+            let room = rawRoom.flatMap { AppConfig.canonicalRoom($0) } ?? rawRoom
             return BookedEvent(
                 id: item.id ?? UUID().uuidString,
                 room: room,
+                rawRoom: rawRoom,
                 title: title.isEmpty ? summary : title,
                 start: s, end: e,
                 colorId: item.colorId,

@@ -211,6 +211,14 @@ final class BookingViewModel: ObservableObject {
         }
     }
 
+    /// 일시를 '오늘 · 지금 기준 가장 가까운 미래 슬롯'으로 되돌린다.
+    func resetToNow() {
+        let now = Date()
+        date = now
+        startMinutes = Self.nearestFutureSlot(timeSlots, now: now)
+        loadEvents()
+    }
+
     /// 특정 회의실의 그 날 예약들.
     func events(forRoom name: String) -> [BookedEvent] {
         dayEvents.filter { $0.room == name }
@@ -447,6 +455,16 @@ struct BookingView: View {
 
     // MARK: header
 
+    /// Google 캘린더 웹 주소. 로그인 계정을 알면 authuser 로 그 계정을 지정해
+    /// 브라우저가 다른(첫 번째) 계정으로 열지 않도록 한다.
+    private var calendarWebURL: URL {
+        var comps = URLComponents(string: "https://calendar.google.com/calendar/r")!
+        if !vm.myEmail.isEmpty {
+            comps.queryItems = [URLQueryItem(name: "authuser", value: vm.myEmail)]
+        }
+        return comps.url!
+    }
+
     private var header: some View {
         HStack(alignment: .center, spacing: 9) {
             VStack(alignment: .leading, spacing: 2) {
@@ -456,6 +474,15 @@ struct BookingView: View {
                     .font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.blue)
             }
             Spacer()
+            Link(destination: calendarWebURL) {
+                Image(systemName: "safari")
+                    .font(.system(size: 13, weight: .bold)).foregroundColor(Theme.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Theme.chipBg))
+            }
+            .buttonStyle(.plain)
+            .help(vm.myEmail.isEmpty ? "Google 캘린더 웹에서 열기"
+                                     : "Google 캘린더 웹에서 열기 (\(vm.myEmail))")
             Menu {
                 if vm.signedIn {
                     Button("로그아웃 / 계정 변경") { vm.signOut() }
@@ -479,7 +506,14 @@ struct BookingView: View {
 
     private var scheduleCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("일시")
+            HStack(spacing: 6) {
+                sectionTitle("일시")
+                Spacer()
+                Button(action: { vm.resetToNow() }) {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                }.buttonStyle(.plain).help("오늘·현재 시각으로")
+            }
             dateRow
             timePills
             durationSegmented
@@ -814,6 +848,9 @@ struct DayTimelineView: View {
                 Spacer(minLength: 0)
             }
             .frame(width: labelWidth, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture { vm.selectedRoom = room }   // 회의실명 클릭 → 회의실 선택
+            .help("\(room.name) 선택")
 
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -855,6 +892,10 @@ struct DayTimelineView: View {
                 .font(.system(size: 11, weight: .bold)).foregroundColor(.white)
             Text(ev.timeText)
                 .font(.system(size: 10)).foregroundColor(.white.opacity(0.85))
+            if ev.roomCorrected, let raw = ev.rawRoom {
+                Text("✎ 원본 표기: [\(raw)] (오타 보정됨)")
+                    .font(.system(size: 9)).foregroundColor(Color(hex: "FFD8A8"))
+            }
         }
         .padding(.horizontal, 9).padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.textPrimary))

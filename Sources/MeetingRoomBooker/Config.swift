@@ -41,4 +41,46 @@ enum AppConfig {
         }
         return names
     }
+
+    /// 제목에서 뽑은 회의실명을 표준 회의실명으로 보정한다.
+    /// 구글 캘린더에 직접 타이핑하다 생긴 오타("소희의실" → "소회의실")를 커버하기 위함.
+    ///
+    /// - 정확히 일치하면 그대로 반환.
+    /// - 아니면 편집거리(Levenshtein)가 가장 가까운 회의실로 매칭하되,
+    ///   거리가 임계값을 넘거나(너무 다름) 동률 후보가 둘 이상이면(애매함) 보정하지 않고 nil.
+    ///   → "대회의실"(A/B 애매), "포커스룸"(너무 멀음) 같은 건 그대로 기타 일정으로 남는다.
+    /// - 매칭 실패 시 nil 을 반환하므로, 호출부는 nil 이면 원래 이름을 유지하면 된다.
+    static func canonicalRoom(_ raw: String) -> String? {
+        let name = raw.trimmingCharacters(in: .whitespaces)
+        if name.isEmpty { return nil }
+        if rooms.contains(where: { $0.name == name }) { return name }   // 정확 일치
+
+        // 임계값 안에 드는 후보들 수집 (회의실명 길이의 약 1/3, 최소 1글자까지 허용)
+        let candidates: [(room: String, dist: Int)] = rooms.compactMap { room in
+            let d = levenshtein(name, room.name)
+            let threshold = max(1, Int((Double(room.name.count) * 0.34).rounded()))
+            return d <= threshold ? (room.name, d) : nil
+        }
+        guard let minDist = candidates.map(\.dist).min() else { return nil }
+        let closest = candidates.filter { $0.dist == minDist }
+        return closest.count == 1 ? closest[0].room : nil   // 유일 최근접일 때만 보정
+    }
+
+    /// 두 문자열의 편집거리(삽입/삭제/치환 횟수). 한글은 글자(Character) 단위로 비교한다.
+    private static func levenshtein(_ a: String, _ b: String) -> Int {
+        let s = Array(a), t = Array(b)
+        if s.isEmpty { return t.count }
+        if t.isEmpty { return s.count }
+        var prev = Array(0...t.count)
+        var curr = [Int](repeating: 0, count: t.count + 1)
+        for i in 1...s.count {
+            curr[0] = i
+            for j in 1...t.count {
+                let cost = s[i - 1] == t[j - 1] ? 0 : 1
+                curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+            }
+            swap(&prev, &curr)
+        }
+        return prev[t.count]
+    }
 }
