@@ -12,7 +12,7 @@ private struct CalendarListResponse: Codable {
 
 private struct EventsResponse: Codable {
     struct When: Codable { let dateTime: String?; let date: String? }
-    struct Person: Codable { let email: String?; let `self`: Bool? }
+    struct Person: Codable { let email: String?; let displayName: String?; let `self`: Bool? }
     struct Item: Codable {
         let id: String?
         let summary: String?
@@ -21,6 +21,7 @@ private struct EventsResponse: Codable {
         let end: When?
         let creator: Person?
         let organizer: Person?
+        let created: String?   // 이벤트가 실제로 생성된 시각 (중복 예약 시 선착순 판별용)
     }
     let items: [Item]
 }
@@ -102,6 +103,7 @@ final class GoogleCalendarService {
             let (rawRoom, title) = splitRoom(summary)
             // 오타가 있어도 표준 회의실명으로 보정. 보정 실패(nil)면 원래 적힌 이름을 유지한다.
             let room = rawRoom.flatMap { AppConfig.canonicalRoom($0) } ?? rawRoom
+            let createdAt = item.created.flatMap { parseFmt.date(from: $0) ?? parseFmtFrac.date(from: $0) }
             return BookedEvent(
                 id: item.id ?? UUID().uuidString,
                 room: room,
@@ -109,7 +111,9 @@ final class GoogleCalendarService {
                 title: title.isEmpty ? summary : title,
                 start: s, end: e,
                 colorId: item.colorId,
-                creatorEmail: item.creator?.email
+                creatorEmail: item.creator?.email,
+                creatorName: item.creator?.displayName,
+                createdAt: createdAt
             )
         }
         .sorted { $0.start < $1.start }
@@ -122,6 +126,35 @@ final class GoogleCalendarService {
         let url = URL(string: "https://www.googleapis.com/calendar/v3/calendars/\(encoded)/events")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        fmt.timeZone = TimeZone.current
+        let tz = TimeZone.current.identifier
+
+        let event: [String: Any] = [
+            "summary": summary,
+            "colorId": colorId,
+            "start": ["dateTime": fmt.string(from: start), "timeZone": tz],
+            "end": ["dateTime": fmt.string(from: end), "timeZone": tz],
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: event)
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        try checkResponse(resp, data)
+    }
+
+    /// 선택한 캘린더의 예약 이벤트 1건을 수정한다. (내가 만든 예약만 호출할 것)
+    /// PATCH로 제목·색상·시작/종료만 갱신한다.
+    func updateBooking(calendarId: String, eventId: String, summary: String, colorId: String, start: Date, end: Date) async throws {
+        let token = try await GoogleAuth.shared.validAccessToken()
+        let encCal = calendarId.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? calendarId
+        let encEvent = eventId.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? eventId
+        let url = URL(string: "https://www.googleapis.com/calendar/v3/calendars/\(encCal)/events/\(encEvent)")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "PATCH"
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 

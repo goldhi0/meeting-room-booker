@@ -49,6 +49,7 @@ final class BookingViewModel: ObservableObject {
         let s = combinedStart()
         let e = s.addingTimeInterval(TimeInterval(durationMinutes * 60))
         return dayEvents.first { ev in
+            guard ev.id != editingEventId else { return false }   // 수정 중인 예약 자신과는 겹침으로 보지 않음
             guard let r = ev.room, blockers.contains(r) else { return false }
             return ev.start < e && s < ev.end
         }
@@ -66,6 +67,7 @@ final class BookingViewModel: ObservableObject {
         let s = combinedStart()
         let e = s.addingTimeInterval(TimeInterval(durationMinutes * 60))
         return !dayEvents.contains { ev in
+            guard ev.id != editingEventId else { return false }   // 수정 중인 예약 자신은 점유로 보지 않음
             guard let r = ev.room, blockers.contains(r) else { return false }
             return ev.start < e && s < ev.end
         }
@@ -224,6 +226,39 @@ final class BookingViewModel: ObservableObject {
         dayEvents.filter { $0.room == name }
     }
 
+    /// 이 예약과 같은(또는 포함 관계인) 회의실에서 시간이 겹치는 다른 예약들. (중복 예약 표시용)
+    func overlappingEvents(for ev: BookedEvent) -> [BookedEvent] {
+        guard let room = ev.room else { return [] }
+        let blockers = AppConfig.blockedRoomNames(for: room)
+        return dayEvents.filter { other in
+            guard other.id != ev.id else { return false }
+            guard let r = other.room, blockers.contains(r) else { return false }
+            return other.start < ev.end && ev.start < other.end
+        }
+    }
+
+    /// 타임라인에서 클릭으로 선택한 예약 id. 상세 카드 표시용 (다시 클릭하면 해제).
+    @Published var selectedEventId: String? = nil
+
+    func toggleSelectedEvent(_ id: String) {
+        selectedEventId = (selectedEventId == id) ? nil : id
+    }
+
+    /// 클릭으로 선택된 예약. 목록이 갱신돼 사라졌으면 자동으로 nil.
+    var selectedEvent: BookedEvent? {
+        guard let id = selectedEventId else { return nil }
+        return dayEvents.first { $0.id == id }
+    }
+
+    /// 선택한 예약과 그 예약에 시간이 겹치는 예약들을 모두 합친 목록 (생성 시각 순). 겹치는 막대는
+    /// 같은 자리에 포개져 그려져 클릭해도 맨 위 막대 하나만 선택되므로, 상세 카드에는 겹치는 예약
+    /// 전체를 함께 보여준다.
+    var selectedGroup: [BookedEvent] {
+        guard let ev = selectedEvent else { return [] }
+        let group = overlappingEvents(for: ev) + [ev]
+        return group.sorted { ($0.createdAt ?? $0.start) < ($1.createdAt ?? $1.start) }
+    }
+
     /// 이벤트가 로그인 계정이 만든 내 예약인지.
     func isMine(_ ev: BookedEvent) -> Bool {
         guard !myEmail.isEmpty, let email = ev.creatorEmail else { return false }
@@ -238,6 +273,82 @@ final class BookingViewModel: ObservableObject {
     /// 삭제 중인 예약 id (버튼 비활성/스피너 표시용).
     @Published var deletingId: String? = nil
 
+    /// 현재 수정 중인 예약 id. nil이면 새 예약 모드.
+    @Published var editingEventId: String? = nil
+    var isEditing: Bool { editingEventId != nil }
+
+    /// "[팀] 제목" 형태의 문자열에서 팀과 제목을 분리한다. 팀 표기가 없으면 ("", 원문).
+    static func splitTeam(_ s: String) -> (team: String, title: String) {
+        if s.hasPrefix("["), let close = s.firstIndex(of: "]") {
+            let team = String(s[s.index(after: s.startIndex)..<close])
+            let rest = s[s.index(after: close)...].trimmingCharacters(in: .whitespaces)
+            return (team, rest)
+        }
+        return ("", s)
+    }
+
+    /// 내 예약 1건을 수정 모드로 불러온다. 폼(회의실·팀·제목·일시·길이)을 그 예약 값으로 채운다.
+    func beginEdit(_ ev: BookedEvent) {
+        guard isMine(ev) else { return }
+        editingEventId = ev.id
+        if let r = ev.room { selectedRoom = AppConfig.rooms.first { $0.name == r } }
+        let parts = Self.splitTeam(ev.title)   // BookedEvent.title 은 이미 회의실명이 제거된 "[팀] 제목"
+        team = parts.team
+        title = parts.title
+        date = Calendar.current.startOfDay(for: ev.start)
+        startMinutes = ev.startMinuteOfDay
+        durationMinutes = max(30, Int(ev.end.timeIntervalSince(ev.start) / 60))
+        status = ""
+    }
+
+    /// 수정 모드를 취소하고 새 예약 모드로 돌아간다.
+    func cancelEdit() {
+        editingEventId = nil
+        title = ""
+        team = ""
+        status = ""
+    }
+
+    /// 기본 버튼 동작: 수정 모드면 수정, 아니면 새 예약.
+    func submit() {
+        if isEditing { updateBooking() } else { book() }
+    }
+
+    /// 수정 중인 예약을 변경된 폼 값으로 갱신한다.
+    func updateBooking() {
+        guard let eventId = editingEventId else { return }
+        guard !targetCalendarId.isEmpty else {
+            status = "⚠️ 캘린더 접근 권한을 확인하세요."
+            return
+        }
+        guard let room = selectedRoom else {
+            status = "⚠️ 회의실을 선택하세요."
+            return
+        }
+        let calId = targetCalendarId
+        let start = combinedStart()
+        let end = start.addingTimeInterval(TimeInterval(durationMinutes * 60))
+        let summary = composedTitle
+        isBusy = true
+        status = "수정 중…"
+        Task { @MainActor in
+            do {
+                try await GoogleCalendarService.shared.updateBooking(
+                    calendarId: calId, eventId: eventId, summary: summary, colorId: room.colorId, start: start, end: end
+                )
+                status = ""
+                editingEventId = nil
+                title = ""
+                team = ""
+                isBusy = false
+                loadEvents()
+            } catch {
+                status = "⚠️ " + error.localizedDescription
+                isBusy = false
+            }
+        }
+    }
+
     /// 내가 만든 예약 1건을 삭제한다.
     func deleteEvent(_ event: BookedEvent) {
         guard !targetCalendarId.isEmpty, isMine(event) else { return }
@@ -248,6 +359,7 @@ final class BookingViewModel: ObservableObject {
             do {
                 try await GoogleCalendarService.shared.deleteBooking(calendarId: calId, eventId: eventId)
                 status = ""   // 성공 알림 없이 목록 갱신으로 반영
+                if editingEventId == eventId { cancelEdit() }   // 수정 중이던 예약이 삭제되면 수정 모드 해제
                 deletingId = nil
                 loadEvents()
             } catch {
@@ -390,7 +502,15 @@ struct BookingView: View {
                 myBookingsCard
                 roomCard
                 titleCard
-                primaryButton(bookTitle, color: Theme.blue, disabled: !vm.canBook) { vm.book() }
+                primaryButton(bookTitle, color: Theme.blue, disabled: !vm.canBook) { vm.submit() }
+                if vm.isEditing {
+                    Button(action: { vm.cancelEdit() }) {
+                        Text("수정 취소")
+                            .font(.system(size: 13, weight: .semibold)).foregroundColor(Theme.textSecondary)
+                            .frame(maxWidth: .infinity).frame(height: 40)
+                    }
+                    .buttonStyle(.plain).disabled(vm.isBusy)
+                }
                 statusLabel
             }
             .padding(16)
@@ -611,8 +731,64 @@ struct BookingView: View {
                 }.buttonStyle(.plain).help("새로고침")
             }
             DayTimelineView(vm: vm)
+            if !vm.selectedGroup.isEmpty {
+                selectedEventCard(vm.selectedGroup)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
+        .animation(.easeOut(duration: 0.16), value: vm.selectedEventId)
         .tossCard()
+    }
+
+    /// 타임라인 막대 클릭 시 나타나는 상세 카드. 겹치는 막대는 같은 자리에 포개져 그려지므로
+    /// 클릭한 예약 하나가 아니라 그 시간대에 겹치는 예약 전체(group)를 생성 시각 순으로 나열한다.
+    private func selectedEventCard(_ group: [BookedEvent]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("예약 상세").font(.system(size: 12, weight: .bold)).foregroundColor(Theme.textPrimary)
+                Spacer()
+                Button(action: { vm.selectedEventId = nil }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold)).foregroundColor(Theme.textSecondary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Theme.chipBg))
+                }.buttonStyle(.plain)
+            }
+            ForEach(Array(group.enumerated()), id: \.element.id) { index, ev in
+                if index > 0 { Divider() }
+                selectedEventRow(ev, isClicked: ev.id == vm.selectedEventId)
+            }
+        }
+        .padding(11)
+        .background(RoundedRectangle(cornerRadius: 11).fill(Theme.chipBg))
+    }
+
+    private func selectedEventRow(_ ev: BookedEvent, isClicked: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 3).fill(ev.displayColor).frame(width: 4, height: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(ev.room.map { "[\($0)] \(ev.title)" } ?? ev.title)
+                        .font(.system(size: 13, weight: .bold)).foregroundColor(Theme.textPrimary).lineLimit(1)
+                    Text(ev.timeText).font(.system(size: 11)).foregroundColor(Theme.textSecondary)
+                }
+                Spacer(minLength: 0)
+            }
+            detailRow("예약자", ev.creatorDisplay ?? "알 수 없음")
+            detailRow("예약 생성 시각", ev.createdAtText ?? "알 수 없음")
+            if ev.roomCorrected, let raw = ev.rawRoom {
+                detailRow("원본 표기", "[\(raw)] (오타 보정됨)")
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 9).fill(isClicked ? Theme.blueSoft : Color.clear))
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 6) {
+            Text(label).font(.system(size: 11)).foregroundColor(Theme.textSecondary)
+            Text(value).font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.textPrimary)
+        }
     }
 
     // MARK: my bookings
@@ -642,14 +818,23 @@ struct BookingView: View {
 
     private func myBookingRow(_ ev: BookedEvent) -> some View {
         let deleting = vm.deletingId == ev.id
+        let editing = vm.editingEventId == ev.id
         return HStack(spacing: 9) {
             RoundedRectangle(cornerRadius: 4).fill(ev.displayColor).frame(width: 5, height: 32)
             VStack(alignment: .leading, spacing: 2) {
                 Text(ev.room.map { "[\($0)] \(ev.title)" } ?? ev.title)
                     .font(.system(size: 13, weight: .bold)).foregroundColor(Theme.textPrimary).lineLimit(1)
-                Text(ev.timeText).font(.system(size: 11)).foregroundColor(Theme.textSecondary)
+                Text(editing ? "\(ev.timeText) · 수정 중" : ev.timeText)
+                    .font(.system(size: 11)).foregroundColor(editing ? Theme.blue : Theme.textSecondary)
             }
             Spacer(minLength: 0)
+            Button(action: { vm.beginEdit(ev) }) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 12, weight: .semibold)).foregroundColor(Theme.blue)
+                    .frame(width: 30, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(Theme.blue.opacity(0.1)))
+            }
+            .buttonStyle(.plain).disabled(vm.deletingId != nil || vm.isBusy).help("예약 수정")
             Button(action: { vm.deleteEvent(ev) }) {
                 if deleting {
                     ProgressView().controlSize(.small)
@@ -663,7 +848,11 @@ struct BookingView: View {
             .buttonStyle(.plain).disabled(vm.deletingId != nil).help("예약 삭제")
         }
         .padding(.horizontal, 11).padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 11).fill(Theme.chipBg))
+        .background(RoundedRectangle(cornerRadius: 11).fill(editing ? Theme.blueSoft : Theme.chipBg))
+        .overlay(
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(editing ? Theme.blue : Color.clear, lineWidth: 1.5)
+        )
     }
 
     // MARK: rooms
@@ -736,10 +925,10 @@ struct BookingView: View {
     }
 
     private var bookTitle: String {
-        if vm.isBusy { return "예약 중…" }
+        if vm.isBusy { return vm.isEditing ? "수정 중…" : "예약 중…" }
         if vm.selectedRoom == nil { return "회의실을 선택하세요" }
         if vm.conflict != nil { return "이미 예약된 시간이에요" }
-        return "예약하기"
+        return vm.isEditing ? "수정 완료" : "예약하기"
     }
 
     // MARK: shared bits
@@ -866,9 +1055,11 @@ struct DayTimelineView: View {
                         Rectangle().fill(nowColor)
                             .frame(width: 1.5, height: rowHeight)
                             .offset(x: x(nowMinute, geo.size.width))
+                            .allowsHitTesting(false)
                     }
                     if isSelected {
                         proposed(geo.size.width)
+                            .allowsHitTesting(false)   // 장식용 표시라 아래 예약 막대의 호버/클릭을 가로채면 안 됨
                     }
                     // 커서 올린 막대 위에 즉시 뜨는 제목 툴팁
                     if let ev = evs.first(where: { $0.id == hoveredID }) {
@@ -885,7 +1076,7 @@ struct DayTimelineView: View {
         .zIndex(evs.contains { $0.id == hoveredID } ? 1 : 0)
     }
 
-    /// 막대 위에 뜨는 제목+시간 툴팁.
+    /// 막대 위에 뜨는 제목+시간 툴팁. 예약자·생성 시각·중복 여부는 클릭 시 카드로 표시한다.
     private func tooltip(_ ev: BookedEvent) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(ev.room.map { "[\($0)] \(ev.title)" } ?? ev.title)
@@ -908,15 +1099,32 @@ struct DayTimelineView: View {
         let x0 = x(ev.startMinuteOfDay, width)
         let x1 = x(ev.endMinuteOfDay, width)
         let w = max(3, x1 - x0)
+        let overlapping = !vm.overlappingEvents(for: ev).isEmpty
+        let selected = vm.selectedEventId == ev.id
         return RoundedRectangle(cornerRadius: 5)
             .fill(color)
             .frame(width: w, height: rowHeight - 4)
-            .offset(x: x0)
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color(hex: "F04452"), style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+                    .opacity(overlapping ? 1 : 0)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.white, lineWidth: 2)
+                    .opacity(selected ? 1 : 0)
+            )
+            .contentShape(Rectangle())
             .onHover { hovering in
                 if hovering { hoveredID = ev.id }
                 else if hoveredID == ev.id { hoveredID = nil }
             }
+            .onTapGesture { vm.toggleSelectedEvent(ev.id) }
             .help("\(ev.timeText) \(ev.title)")
+            // .offset(x:)이 아닌 .position()을 써야 한다: macOS에서 .offset은 그리는 위치만 옮기고
+            // onHover의 마우스 추적 영역(NSTrackingArea)은 옮기기 전 위치에 그대로 남는 버그가 있어,
+            // 실제로 칠해진 막대 대신 x0(막대 왼쪽 시작 지점) 부근에서만 호버가 인식됐다.
+            .position(x: x0 + w / 2, y: rowHeight / 2)
     }
 
     private func proposed(_ width: CGFloat) -> some View {

@@ -29,6 +29,8 @@ struct BookedEvent: Identifiable, Hashable {
     let end: Date
     let colorId: String?
     let creatorEmail: String?   // 이벤트를 만든 사람의 이메일 (내 예약 판별용)
+    let creatorName: String?    // 이벤트를 만든 사람의 표시 이름 (있으면 이메일보다 우선 표시)
+    let createdAt: Date?        // 이벤트가 실제로 생성된 시각 (중복 예약 시 선착순 판별용)
 
     /// 제목의 회의실명에 오타가 있어 표준 회의실명으로 보정됐는지.
     var roomCorrected: Bool {
@@ -36,11 +38,27 @@ struct BookedEvent: Identifiable, Hashable {
         return room != rawRoom
     }
 
+    /// 예약자 표시용 이름. displayName이 없으면 이메일의 "@" 앞부분을 사용.
+    var creatorDisplay: String? {
+        if let n = creatorName, !n.isEmpty { return n }
+        if let e = creatorEmail, let at = e.firstIndex(of: "@") { return String(e[..<at]) }
+        return creatorEmail
+    }
+
     private static let hm: DateFormatter = {
         let f = DateFormatter(); f.locale = Locale(identifier: "ko_KR"); f.dateFormat = "HH:mm"; return f
     }()
+    private static let createdFmt: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "ko_KR"); f.dateFormat = "yyyy년 M월 d일 HH:mm:ss"; return f
+    }()
 
     var timeText: String { "\(Self.hm.string(from: start))~\(Self.hm.string(from: end))" }
+
+    /// "2026년 7월 23일 14:02:07" 형태의 예약(생성) 시각.
+    var createdAtText: String? {
+        guard let createdAt = createdAt else { return nil }
+        return Self.createdFmt.string(from: createdAt)
+    }
 
     var startMinuteOfDay: Int {
         let c = Calendar.current.dateComponents([.hour, .minute], from: start)
